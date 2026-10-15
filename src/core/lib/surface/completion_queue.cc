@@ -51,6 +51,15 @@ grpc_core::TraceFlag grpc_trace_operation_failures(false, "op_failure");
 grpc_core::DebugOnlyTraceFlag grpc_trace_pending_tags(false, "pending_tags");
 grpc_core::DebugOnlyTraceFlag grpc_trace_cq_refcount(false, "cq_refcount");
 
+// Diagnostic-only observer. It runs before a NEXT completion becomes visible,
+// including the cached-event path, and must not block or call back into gRPC.
+using CqDiagnosticCallback = void (*)(void*, void*);
+static std::atomic<CqDiagnosticCallback> cq_diagnostic_callback{nullptr};
+
+extern "C" void grpc_cq_set_diagnostic_callback(CqDiagnosticCallback callback) {
+  cq_diagnostic_callback.store(callback, std::memory_order_release);
+}
+
 namespace {
 
 // Specifies a cq thread local cache.
@@ -709,6 +718,10 @@ static void cq_end_op_for_next(
   storage->next = static_cast<uintptr_t>(is_success);
 
   cq_check_tag(cq, tag, true); /* Used in debug builds only */
+
+  if (auto callback = cq_diagnostic_callback.load(std::memory_order_acquire)) {
+    callback(cq, tag);
+  }
 
   if (g_cached_cq == cq && g_cached_event == nullptr) {
     g_cached_event = storage;
